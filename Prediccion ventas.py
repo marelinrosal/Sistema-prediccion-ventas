@@ -10,7 +10,7 @@ Autores:
   - Salgado Rojas Marelin Iral
 
 Dependencias:
-  pip install pandas matplotlib scikit-learn numpy
+  pip install pandas matplotlib scikit-learn numpy sqlalchemy
 """
 
 import tkinter as tk
@@ -19,68 +19,78 @@ import pandas as pd
 import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings("ignore")
 
-# ─────────────────────────── PALETA DE COLORES EMPRESARIAL ───────────────────
+from database import Database          # <-- única línea nueva
+
+# ─────────────────────────── PALETA DE COLORES ───────────────────────────────
 COLORS = {
-    "bg":        "#F5F7FA",          # Fondo principal blanco grisáceo
-    "panel":     "#FFFFFF",          # Paneles blancos
-    "panel2":    "#EEF1F6",          # Paneles secundarios azul muy claro
-    "accent":    "#1A56DB",          # Azul corporativo primario
-    "accent2":   "#0E9F6E",          # Verde corporativo
-    "success":   "#057A55",          # Verde oscuro
-    "warning":   "#C27803",          # Ámbar corporativo
-    "danger":    "#C81E1E",          # Rojo corporativo
-    "text":      "#111928",          # Texto principal casi negro
-    "text_dim":  "#6B7280",          # Texto secundario gris
-    "border":    "#D1D5DB",          # Bordes gris claro
-    "chart_bg":  "#FFFFFF",          # Fondo de gráficas blanco
-    "header_bg": "#1A56DB",          # Header azul corporativo
-    "kpi_border":"#DBEAFE",          # Borde tarjetas KPI azul suave
+    "bg":        "#F5F7FA",
+    "panel":     "#FFFFFF",
+    "panel2":    "#EEF1F6",
+    "accent":    "#1A56DB",
+    "accent2":   "#0E9F6E",
+    "success":   "#057A55",
+    "warning":   "#C27803",
+    "danger":    "#C81E1E",
+    "text":      "#111928",
+    "text_dim":  "#6B7280",
+    "border":    "#D1D5DB",
+    "chart_bg":  "#FFFFFF",
+    "header_bg": "#1A56DB",
+    "kpi_border":"#DBEAFE",
 }
 
 CHART_COLORS = ["#1A56DB", "#0E9F6E", "#C27803", "#9061F9", "#C81E1E",
                 "#0694A2", "#E74694", "#057A55"]
 
-# ─────────────────────────── LÓGICA DE DATOS ─────────────────────────────────
+
+# ─────────────────────────── LÓGICA DE NEGOCIO ───────────────────────────────
 class SalesModel:
     def __init__(self):
-        self.df = None
+        self.df         = None
         self.df_monthly = None
 
-    def load_csv(self, path: str) -> tuple[bool, str]:
+    def load_dataframe(self, df: pd.DataFrame) -> tuple[bool, str]:
+        try:
+            self.df = df.copy()
+            if "ingresos" not in self.df.columns:
+                self.df["ingresos"] = self.df["cantidad"] * self.df["precio_unitario"]
+            self._build_monthly()
+            return True, f"✔ {len(df)} registros cargados correctamente."
+        except Exception as e:
+            return False, f"Error al procesar datos: {e}"
+
+    def load_csv(self, path: str) -> tuple[bool, str, pd.DataFrame | None]:
         try:
             df = pd.read_csv(path)
             cols_req = {"fecha", "producto", "cantidad", "precio_unitario"}
             if not cols_req.issubset(set(df.columns.str.lower())):
-                return False, f"El archivo debe tener las columnas: {cols_req}"
+                return False, f"El archivo debe tener: {cols_req}", None
             df.columns = df.columns.str.lower()
-            df["fecha"] = pd.to_datetime(df["fecha"])
+            df["fecha"]    = pd.to_datetime(df["fecha"])
             df["ingresos"] = df["cantidad"] * df["precio_unitario"]
             df.dropna(subset=["fecha", "cantidad", "precio_unitario"], inplace=True)
             df.drop_duplicates(inplace=True)
-            self.df = df
-            self._build_monthly()
-            return True, f"✔ {len(df)} registros cargados correctamente."
+            ok, msg = self.load_dataframe(df)
+            return ok, msg, df if ok else None
         except Exception as e:
-            return False, f"Error al leer el archivo: {e}"
+            return False, f"Error al leer el archivo: {e}", None
 
     def _build_monthly(self):
         df = self.df.copy()
         df["mes"] = df["fecha"].dt.to_period("M")
         self.df_monthly = (
             df.groupby("mes")
-              .agg(total_ingresos=("ingresos", "sum"),
-                   total_cantidad=("cantidad", "sum"),
-                   num_transacciones=("fecha", "count"))
+              .agg(total_ingresos   =("ingresos", "sum"),
+                   total_cantidad   =("cantidad",  "sum"),
+                   num_transacciones=("fecha",     "count"))
               .reset_index()
               .sort_values("mes")
         )
@@ -89,39 +99,39 @@ class SalesModel:
     def summary(self) -> dict:
         df = self.df
         return {
-            "total_ventas":   f"${df['ingresos'].sum():,.0f}",
-            "promedio_mes":   f"${self.df_monthly['total_ingresos'].mean():,.0f}",
-            "productos":      df["producto"].nunique(),
-            "registros":      len(df),
-            "periodo":        f"{df['fecha'].min().strftime('%b %Y')} – {df['fecha'].max().strftime('%b %Y')}",
+            "total_ventas": f"${df['ingresos'].sum():,.0f}",
+            "promedio_mes": f"${self.df_monthly['total_ingresos'].mean():,.0f}",
+            "productos":    df["producto"].nunique(),
+            "registros":    len(df),
+            "periodo":      f"{df['fecha'].min().strftime('%b %Y')} – {df['fecha'].max().strftime('%b %Y')}",
         }
 
     def predict(self, n_months: int, degree: int = 2) -> dict:
-        mon = self.df_monthly
-        X = mon["mes_idx"].values.reshape(-1, 1)
-        y = mon["total_ingresos"].values
+        mon  = self.df_monthly
+        X    = mon["mes_idx"].values.reshape(-1, 1)
+        y    = mon["total_ingresos"].values
         poly = PolynomialFeatures(degree=degree)
-        Xp = poly.fit_transform(X)
+        Xp   = poly.fit_transform(X)
         model = LinearRegression()
         model.fit(Xp, y)
         y_pred_hist = model.predict(Xp)
         mae = mean_absolute_error(y, y_pred_hist)
         r2  = r2_score(y, y_pred_hist)
-        last_idx = mon["mes_idx"].max()
+        last_idx    = mon["mes_idx"].max()
         last_period = mon["mes"].iloc[-1]
-        future_idx = np.arange(last_idx + 1, last_idx + 1 + n_months).reshape(-1, 1)
-        future_Xp  = poly.transform(future_idx)
+        future_idx  = np.arange(last_idx + 1, last_idx + 1 + n_months).reshape(-1, 1)
+        future_Xp   = poly.transform(future_idx)
         future_vals = model.predict(future_Xp)
         future_periods = [last_period + i for i in range(1, n_months + 1)]
         return {
-            "hist_x":    list(mon["mes"].astype(str)),
-            "hist_y":    list(y),
-            "fit_y":     list(y_pred_hist),
-            "future_x":  [str(p) for p in future_periods],
-            "future_y":  list(np.maximum(future_vals, 0)),
-            "mae":       mae,
-            "r2":        r2,
-            "degree":    degree,
+            "hist_x":   list(mon["mes"].astype(str)),
+            "hist_y":   list(y),
+            "fit_y":    list(y_pred_hist),
+            "future_x": [str(p) for p in future_periods],
+            "future_y": list(np.maximum(future_vals, 0)),
+            "mae":      mae,
+            "r2":       r2,
+            "degree":   degree,
         }
 
     def top_products(self, n=5) -> pd.DataFrame:
@@ -132,45 +142,50 @@ class SalesModel:
 
     def monthly_table(self) -> pd.DataFrame:
         m = self.df_monthly.copy()
-        m["mes"] = m["mes"].astype(str)
+        m["mes"]            = m["mes"].astype(str)
         m["total_ingresos"] = m["total_ingresos"].apply(lambda x: f"${x:,.0f}")
-        m = m.rename(columns={
+        return m.rename(columns={
             "mes": "Mes", "total_ingresos": "Ingresos",
             "total_cantidad": "Unidades", "num_transacciones": "Transacciones"
-        })
-        return m[["Mes", "Ingresos", "Unidades", "Transacciones"]]
+        })[["Mes", "Ingresos", "Unidades", "Transacciones"]]
 
 
 # ─────────────────────────── APLICACIÓN PRINCIPAL ────────────────────────────
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Sistema de Predicción de Ventas")
-        self.geometry("1280x780")
+        self.title("Sistema de Prediccion de Ventas")
+        self.geometry("1280x800")
         self.configure(bg=COLORS["bg"])
         self.resizable(True, True)
         self.model = SalesModel()
+        self.db    = Database("ventas.db")
         self._configure_styles()
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        self.db.cerrar()
+        self.destroy()
 
     def _configure_styles(self):
         style = ttk.Style(self)
         style.theme_use("clam")
         style.configure(".", background=COLORS["bg"], foreground=COLORS["text"],
                         font=("Segoe UI", 10))
-        style.configure("TFrame",  background=COLORS["bg"])
+        style.configure("TFrame",      background=COLORS["bg"])
         style.configure("Card.TFrame", background=COLORS["panel"],
                         relief="flat", borderwidth=1)
-        style.configure("TLabel",  background=COLORS["bg"], foreground=COLORS["text"])
-        style.configure("Dim.TLabel", background=COLORS["panel"],
+        style.configure("TLabel",      background=COLORS["bg"], foreground=COLORS["text"])
+        style.configure("Dim.TLabel",  background=COLORS["panel"],
                         foreground=COLORS["text_dim"], font=("Segoe UI", 9))
-        style.configure("Title.TLabel", background=COLORS["panel"],
+        style.configure("Title.TLabel",background=COLORS["panel"],
                         foreground=COLORS["text"], font=("Segoe UI", 13, "bold"))
         style.configure("Big.TLabel",  background=COLORS["panel"],
                         foreground=COLORS["accent"], font=("Segoe UI", 20, "bold"))
-        style.configure("Header.TLabel", background=COLORS["bg"],
+        style.configure("Header.TLabel",background=COLORS["bg"],
                         foreground=COLORS["text"], font=("Segoe UI", 11, "bold"))
-        style.configure("TNotebook", background=COLORS["bg"], borderwidth=0)
+        style.configure("TNotebook",     background=COLORS["bg"], borderwidth=0)
         style.configure("TNotebook.Tab", background=COLORS["panel2"],
                         foreground=COLORS["text_dim"], padding=[16, 8],
                         font=("Segoe UI", 10))
@@ -185,41 +200,39 @@ class App(tk.Tk):
         style.configure("Sec.TButton", background=COLORS["panel2"],
                         foreground=COLORS["text"], font=("Segoe UI", 10),
                         borderwidth=0, padding=[12, 7])
-        style.map("Sec.TButton", background=[("active", COLORS["border"])])
+        style.configure("Danger.TButton", background=COLORS["danger"],
+                        foreground="#FFFFFF", font=("Segoe UI", 9, "bold"),
+                        borderwidth=0, padding=[10, 6])
+        style.map("Danger.TButton", background=[("active", "#A01818")])
+        style.map("Sec.TButton",    background=[("active", COLORS["border"])])
         style.configure("TCombobox", fieldbackground=COLORS["panel"],
-                        background=COLORS["panel2"], foreground=COLORS["text"],
-                        selectbackground=COLORS["accent"], arrowcolor=COLORS["text"])
-        style.configure("TSpinbox", fieldbackground=COLORS["panel"],
                         background=COLORS["panel2"], foreground=COLORS["text"])
-        style.configure("Treeview", background=COLORS["panel"],
-                        fieldbackground=COLORS["panel"],
-                        foreground=COLORS["text"], rowheight=26,
-                        font=("Segoe UI", 9))
+        style.configure("TSpinbox",  fieldbackground=COLORS["panel"],
+                        background=COLORS["panel2"], foreground=COLORS["text"])
+        style.configure("Treeview",  background=COLORS["panel"],
+                        fieldbackground=COLORS["panel"], foreground=COLORS["text"],
+                        rowheight=26, font=("Segoe UI", 9))
         style.configure("Treeview.Heading", background=COLORS["panel2"],
                         foreground=COLORS["text_dim"], font=("Segoe UI", 9, "bold"))
-        style.map("Treeview", background=[("selected", COLORS["accent"])],
+        style.map("Treeview",
+                  background=[("selected", COLORS["accent"])],
                   foreground=[("selected", "#FFFFFF")])
         style.configure("TScrollbar", background=COLORS["panel2"],
                         troughcolor=COLORS["panel"], arrowcolor=COLORS["text_dim"])
 
     def _build_ui(self):
-        # ─ Header azul corporativo ─
         header = tk.Frame(self, bg=COLORS["header_bg"], height=64)
         header.pack(fill="x")
         header.pack_propagate(False)
-        tk.Label(header, text="📊 ", bg=COLORS["header_bg"],
-                 fg="#FFFFFF", font=("Segoe UI", 22)).pack(side="left", padx=(20, 4), pady=10)
-        tk.Label(header, text="Sistema de Predicción de Ventas",
+        tk.Label(header, text="Sistema de Prediccion de Ventas",
                  bg=COLORS["header_bg"], fg="#FFFFFF",
-                 font=("Segoe UI", 16, "bold")).pack(side="left", pady=10)
-        tk.Label(header, text="IT Toluca · ISC · Tópicos de Desarrollo",
+                 font=("Segoe UI", 16, "bold")).pack(side="left", padx=24, pady=10)
+        tk.Label(header, text="IT Toluca · ISC · Topicos de Desarrollo",
                  bg=COLORS["header_bg"], fg="#BFDBFE",
                  font=("Segoe UI", 9)).pack(side="right", padx=20)
 
-        sep = tk.Frame(self, bg=COLORS["kpi_border"], height=2)
-        sep.pack(fill="x")
+        tk.Frame(self, bg=COLORS["kpi_border"], height=2).pack(fill="x")
 
-        # ─ Toolbar ─
         toolbar = tk.Frame(self, bg=COLORS["bg"], pady=10)
         toolbar.pack(fill="x", padx=20)
         self.lbl_file = tk.Label(toolbar, text="Sin archivo cargado",
@@ -229,105 +242,106 @@ class App(tk.Tk):
                                  highlightbackground=COLORS["border"],
                                  highlightthickness=1)
         self.lbl_file.pack(side="left")
-        ttk.Button(toolbar, text="📂  Cargar CSV",
+        ttk.Button(toolbar, text="Cargar CSV",
                    command=self._load_file).pack(side="left", padx=(10, 5))
-        ttk.Button(toolbar, text="🔄  Recargar",
-                   command=self._reload, style="Sec.TButton").pack(side="left")
+        ttk.Button(toolbar, text="Recargar",
+                   command=self._reload,
+                   style="Sec.TButton").pack(side="left")
         self.lbl_status = tk.Label(toolbar, text="", bg=COLORS["bg"],
                                    fg=COLORS["success"], font=("Segoe UI", 9))
         self.lbl_status.pack(side="left", padx=14)
 
-        # ─ Notebook ─
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+
         self.tab_dashboard  = ttk.Frame(self.nb)
         self.tab_tendencias = ttk.Frame(self.nb)
         self.tab_prediccion = ttk.Frame(self.nb)
         self.tab_productos  = ttk.Frame(self.nb)
         self.tab_tabla      = ttk.Frame(self.nb)
-        self.nb.add(self.tab_dashboard,  text="  🏠  Resumen  ")
-        self.nb.add(self.tab_tendencias, text="  📈  Tendencias  ")
-        self.nb.add(self.tab_prediccion, text="  🔮  Predicción  ")
-        self.nb.add(self.tab_productos,  text="  🏆  Productos  ")
-        self.nb.add(self.tab_tabla,      text="  📋  Tabla mensual  ")
+        self.tab_bd         = ttk.Frame(self.nb)
+
+        self.nb.add(self.tab_dashboard,  text="  Resumen  ")
+        self.nb.add(self.tab_tendencias, text="  Tendencias  ")
+        self.nb.add(self.tab_prediccion, text="  Prediccion  ")
+        self.nb.add(self.tab_productos,  text="  Productos  ")
+        self.nb.add(self.tab_tabla,      text="  Tabla mensual  ")
+        self.nb.add(self.tab_bd,         text="  Base de Datos  ")
+
         self._build_dashboard()
         self._build_tendencias()
         self._build_prediccion()
         self._build_productos()
         self._build_tabla()
+        self._build_bd()
 
     # ── Pestaña 1: Resumen ────────────────────────────────────────────────────
     def _build_dashboard(self):
         frm = self.tab_dashboard
-        frm.configure(style="TFrame")
         self.frm_hint = tk.Frame(frm, bg=COLORS["bg"])
         self.frm_hint.place(relx=0.5, rely=0.5, anchor="center")
-        tk.Label(self.frm_hint, text="📂", bg=COLORS["bg"],
-                 font=("Segoe UI", 48)).pack()
         tk.Label(self.frm_hint, text="Carga un archivo CSV para comenzar",
                  bg=COLORS["bg"], fg=COLORS["text_dim"],
                  font=("Segoe UI", 14)).pack(pady=6)
         tk.Label(self.frm_hint,
-                 text="El archivo debe tener columnas:\nfecha, producto, cantidad, precio_unitario",
+                 text="Columnas requeridas: fecha, producto, cantidad, precio_unitario",
                  bg=COLORS["bg"], fg=COLORS["text_dim"],
                  font=("Segoe UI", 10), justify="center").pack()
 
         self.frm_kpis = tk.Frame(frm, bg=COLORS["bg"])
         kpi_defs = [
-            ("💰", "Total Ingresos",    "total_ventas",  COLORS["accent"]),
-            ("📅", "Promedio Mensual",  "promedio_mes",  COLORS["accent2"]),
-            ("📦", "Productos Únicos",  "productos",     COLORS["success"]),
-            ("🗂️", "Registros",         "registros",     COLORS["warning"]),
+            ("Total Ingresos",   "total_ventas", COLORS["accent"]),
+            ("Promedio Mensual", "promedio_mes", COLORS["accent2"]),
+            ("Productos Unicos", "productos",    COLORS["success"]),
+            ("Registros",        "registros",    COLORS["warning"]),
         ]
         self.kpi_labels = {}
-        for icon, title, key, color in kpi_defs:
+        for title, key, color in kpi_defs:
             card = tk.Frame(self.frm_kpis, bg=COLORS["panel"],
                             highlightbackground=color, highlightthickness=2,
-                            width=200, height=100)
+                            width=200, height=90)
             card.pack(side="left", padx=12, pady=8)
             card.pack_propagate(False)
-            tk.Label(card, text=icon, bg=COLORS["panel"],
-                     font=("Segoe UI", 22)).place(x=12, y=10)
             tk.Label(card, text=title, bg=COLORS["panel"],
-                     fg=COLORS["text_dim"], font=("Segoe UI", 9)).place(x=12, y=54)
+                     fg=COLORS["text_dim"], font=("Segoe UI", 9)).place(x=12, y=10)
             lv = tk.Label(card, text="—", bg=COLORS["panel"],
                           fg=color, font=("Segoe UI", 18, "bold"))
-            lv.place(x=12, y=68)
+            lv.place(x=12, y=36)
             self.kpi_labels[key] = lv
 
         self.frm_chart_dash = tk.Frame(frm, bg=COLORS["bg"])
-        self.canvas_dash = None
-        lp = tk.Label(frm, text="Período: —", bg=COLORS["bg"],
-                      fg=COLORS["text_dim"], font=("Segoe UI", 9))
-        lp.pack(side="bottom", pady=4)
-        self.lbl_periodo = lp
+        self.canvas_dash    = None
+        self.lbl_periodo    = tk.Label(frm, text="Periodo: —", bg=COLORS["bg"],
+                                       fg=COLORS["text_dim"], font=("Segoe UI", 9))
+        self.lbl_periodo.pack(side="bottom", pady=4)
 
     def _update_dashboard(self):
         self.frm_hint.place_forget()
         sm = self.model.summary()
         for key, lbl in self.kpi_labels.items():
             lbl.config(text=str(sm[key]))
-        self.lbl_periodo.config(text=f"Período: {sm['periodo']}")
+        self.lbl_periodo.config(text=f"Periodo: {sm['periodo']}")
         self.frm_kpis.pack(side="top", fill="x", padx=20, pady=(20, 0))
-        self.frm_chart_dash.pack(side="top", fill="both", expand=True, padx=20, pady=10)
+        self.frm_chart_dash.pack(side="top", fill="both", expand=True,
+                                 padx=20, pady=10)
         if self.canvas_dash:
             self.canvas_dash.get_tk_widget().destroy()
         mon = self.model.df_monthly
         fig = Figure(figsize=(9, 3.5), facecolor=COLORS["chart_bg"])
-        ax = fig.add_subplot(111, facecolor=COLORS["chart_bg"])
-        xs = [str(m) for m in mon["mes"]]
-        ys = mon["total_ingresos"].values / 1000
+        ax  = fig.add_subplot(111, facecolor=COLORS["chart_bg"])
+        xs  = [str(m) for m in mon["mes"]]
+        ys  = mon["total_ingresos"].values / 1000
         ax.bar(xs, ys, color=COLORS["accent"], alpha=0.85, zorder=3)
-        ax.plot(xs, ys, color=COLORS["accent2"], linewidth=2, marker="o",
-                markersize=4, zorder=4)
-        ax.set_title("Ingresos Mensuales (miles $)", color=COLORS["text"],
-                     fontsize=11, pad=10)
+        ax.plot(xs, ys, color=COLORS["accent2"], linewidth=2,
+                marker="o", markersize=4, zorder=4)
+        ax.set_title("Ingresos Mensuales (miles $)",
+                     color=COLORS["text"], fontsize=11, pad=10)
         ax.tick_params(axis="x", rotation=45, labelsize=7, colors=COLORS["text_dim"])
-        ax.tick_params(axis="y", labelsize=8, colors=COLORS["text_dim"])
-        ax.set_facecolor(COLORS["chart_bg"])
+        ax.tick_params(axis="y", labelsize=8,  colors=COLORS["text_dim"])
         for spine in ax.spines.values():
             spine.set_edgecolor(COLORS["border"])
-        ax.yaxis.grid(True, color=COLORS["border"], linestyle="--", alpha=0.5, zorder=0)
+        ax.yaxis.grid(True, color=COLORS["border"], linestyle="--",
+                      alpha=0.5, zorder=0)
         fig.tight_layout()
         self.canvas_dash = FigureCanvasTkAgg(fig, master=self.frm_chart_dash)
         self.canvas_dash.draw()
@@ -335,78 +349,85 @@ class App(tk.Tk):
 
     # ── Pestaña 2: Tendencias ─────────────────────────────────────────────────
     def _build_tendencias(self):
-        frm = self.tab_tendencias
+        frm  = self.tab_tendencias
         ctrl = tk.Frame(frm, bg=COLORS["bg"])
         ctrl.pack(fill="x", padx=16, pady=10)
         tk.Label(ctrl, text="Agrupar por:", bg=COLORS["bg"],
-                 fg=COLORS["text"], font=("Segoe UI", 10)).pack(side="left")
-        self.cmb_group = ttk.Combobox(ctrl, values=["Mes", "Categoría", "Región"],
-                                      state="readonly", width=14)
+                 fg=COLORS["text"]).pack(side="left")
+        self.cmb_group = ttk.Combobox(
+            ctrl, values=["Mes", "Categoria", "Region"],
+            state="readonly", width=14)
         self.cmb_group.set("Mes")
         self.cmb_group.pack(side="left", padx=8)
-        ttk.Button(ctrl, text="Actualizar gráfico",
+        ttk.Button(ctrl, text="Actualizar grafico",
                    command=self._update_tendencias).pack(side="left")
         self.frm_tend = tk.Frame(frm, bg=COLORS["bg"])
         self.frm_tend.pack(fill="both", expand=True, padx=16, pady=(0, 10))
-        self.canvas_tend = None
-        self._placeholder(self.frm_tend, "Carga un archivo CSV para ver tendencias")
+        self._placeholder(self.frm_tend, "Carga un CSV para ver tendencias")
 
     def _update_tendencias(self):
         for w in self.frm_tend.winfo_children():
             w.destroy()
-        if not self.model.df_monthly is not None and self.model.df is None:
+        if self.model.df is None:
             return
         group = self.cmb_group.get()
-        df = self.model.df.copy()
-        fig = Figure(figsize=(9, 4.5), facecolor=COLORS["chart_bg"])
-        ax = fig.add_subplot(111, facecolor=COLORS["chart_bg"])
+        df    = self.model.df.copy()
+        fig   = Figure(figsize=(9, 4.5), facecolor=COLORS["chart_bg"])
+        ax    = fig.add_subplot(111, facecolor=COLORS["chart_bg"])
         if group == "Mes":
             mon = self.model.df_monthly
-            xs = [str(m) for m in mon["mes"]]
+            xs  = [str(m) for m in mon["mes"]]
             ax.fill_between(xs, mon["total_ingresos"] / 1000,
                             alpha=0.15, color=COLORS["accent"])
             ax.plot(xs, mon["total_ingresos"] / 1000,
-                    color=COLORS["accent"], linewidth=2.5, marker="o", markersize=5)
-            ax.set_title("Ingresos por Mes (miles $)", color=COLORS["text"], fontsize=12)
+                    color=COLORS["accent"], linewidth=2.5,
+                    marker="o", markersize=5)
+            ax.set_title("Ingresos por Mes (miles $)",
+                         color=COLORS["text"], fontsize=12)
             ax.tick_params(axis="x", rotation=45, labelsize=7)
-        elif group == "Categoría":
+        elif group == "Categoria":
             if "categoria" not in df.columns:
-                messagebox.showinfo("Info", "El archivo no tiene columna 'categoria'.")
+                messagebox.showinfo("Info",
+                    "El archivo no tiene columna 'categoria'.")
                 return
             cat_data = df.groupby("categoria")["ingresos"].sum()
-            wedges, texts, autotexts = ax.pie(
+            _, texts, autotexts = ax.pie(
                 cat_data, labels=cat_data.index, autopct="%1.1f%%",
                 colors=CHART_COLORS[:len(cat_data)], startangle=90,
-                pctdistance=0.82, wedgeprops={"linewidth": 2, "edgecolor": COLORS["chart_bg"]})
+                pctdistance=0.82,
+                wedgeprops={"linewidth": 2, "edgecolor": COLORS["chart_bg"]})
             for t in texts + autotexts:
                 t.set_color(COLORS["text"])
-            ax.set_title("Ingresos por Categoría", color=COLORS["text"], fontsize=12)
-        elif group == "Región":
+            ax.set_title("Ingresos por Categoria",
+                         color=COLORS["text"], fontsize=12)
+        elif group == "Region":
             if "region" not in df.columns:
-                messagebox.showinfo("Info", "El archivo no tiene columna 'region'.")
+                messagebox.showinfo("Info",
+                    "El archivo no tiene columna 'region'.")
                 return
-            reg_data = df.groupby("region")["ingresos"].sum().sort_values(ascending=True)
+            reg_data = df.groupby("region")["ingresos"].sum() \
+                         .sort_values(ascending=True)
             bars = ax.barh(reg_data.index, reg_data.values / 1000,
                            color=CHART_COLORS[:len(reg_data)])
             for bar, val in zip(bars, reg_data.values / 1000):
-                ax.text(val + 0.5, bar.get_y() + bar.get_height() / 2,
+                ax.text(val + 0.5,
+                        bar.get_y() + bar.get_height() / 2,
                         f"${val:,.0f}k", va="center",
                         color=COLORS["text"], fontsize=9)
-            ax.set_title("Ingresos por Región (miles $)", color=COLORS["text"], fontsize=12)
+            ax.set_title("Ingresos por Region (miles $)",
+                         color=COLORS["text"], fontsize=12)
         for spine in ax.spines.values():
             spine.set_edgecolor(COLORS["border"])
         ax.tick_params(colors=COLORS["text_dim"])
-        ax.yaxis.label.set_color(COLORS["text_dim"])
-        ax.xaxis.label.set_color(COLORS["text_dim"])
         fig.tight_layout()
         canvas = FigureCanvasTkAgg(fig, master=self.frm_tend)
         canvas.draw()
         canvas.get_tk_widget().pack(fill="both", expand=True)
         NavigationToolbar2Tk(canvas, self.frm_tend).pack(side="bottom", fill="x")
 
-    # ── Pestaña 3: Predicción ─────────────────────────────────────────────────
+    # ── Pestaña 3: Prediccion ─────────────────────────────────────────────────
     def _build_prediccion(self):
-        frm = self.tab_prediccion
+        frm  = self.tab_prediccion
         ctrl = tk.Frame(frm, bg=COLORS["bg"])
         ctrl.pack(fill="x", padx=16, pady=12)
         tk.Label(ctrl, text="Meses a predecir:", bg=COLORS["bg"],
@@ -414,25 +435,32 @@ class App(tk.Tk):
         self.spin_months = ttk.Spinbox(ctrl, from_=1, to=24, width=5)
         self.spin_months.set(6)
         self.spin_months.pack(side="left", padx=8)
-        tk.Label(ctrl, text="Grado de regresión:", bg=COLORS["bg"],
+        tk.Label(ctrl, text="Grado de regresion:", bg=COLORS["bg"],
                  fg=COLORS["text"]).pack(side="left", padx=(16, 0))
-        self.cmb_degree = ttk.Combobox(ctrl, values=["1 - Lineal", "2 - Cuadrática", "3 - Cúbica"],
-                                       state="readonly", width=18)
-        self.cmb_degree.set("2 - Cuadrática")
+        self.cmb_degree = ttk.Combobox(
+            ctrl, values=["1 - Lineal", "2 - Cuadratica", "3 - Cubica"],
+            state="readonly", width=18)
+        self.cmb_degree.set("2 - Cuadratica")
         self.cmb_degree.pack(side="left", padx=8)
-        ttk.Button(ctrl, text="🔮  Generar Predicción",
+        ttk.Button(ctrl, text="Generar Prediccion",
                    command=self._run_prediction).pack(side="left", padx=8)
+
         self.frm_metrics = tk.Frame(frm, bg=COLORS["bg"])
         self.frm_metrics.pack(fill="x", padx=16, pady=(0, 6))
-        self.lbl_mae = tk.Label(self.frm_metrics, text="MAE: —", bg=COLORS["bg"],
-                                fg=COLORS["text_dim"], font=("Segoe UI", 9))
+        self.lbl_mae = tk.Label(self.frm_metrics, text="MAE: —",
+                                bg=COLORS["bg"], fg=COLORS["text_dim"],
+                                font=("Segoe UI", 9))
         self.lbl_mae.pack(side="left", padx=4)
-        self.lbl_r2 = tk.Label(self.frm_metrics, text="R²: —", bg=COLORS["bg"],
-                               fg=COLORS["text_dim"], font=("Segoe UI", 9))
+        self.lbl_r2 = tk.Label(self.frm_metrics, text="R2: —",
+                               bg=COLORS["bg"], fg=COLORS["text_dim"],
+                               font=("Segoe UI", 9))
         self.lbl_r2.pack(side="left", padx=4)
+
         self.frm_pred_chart = tk.Frame(frm, bg=COLORS["bg"])
-        self.frm_pred_chart.pack(fill="both", expand=True, padx=16, pady=(0, 10))
-        self._placeholder(self.frm_pred_chart, "Configura los parámetros y presiona 'Generar Predicción'")
+        self.frm_pred_chart.pack(fill="both", expand=True,
+                                 padx=16, pady=(0, 10))
+        self._placeholder(self.frm_pred_chart,
+            "Configura los parametros y presiona 'Generar Prediccion'")
         self.frm_pred_tbl = tk.Frame(frm, bg=COLORS["bg"])
         self.frm_pred_tbl.pack(fill="x", padx=16, pady=(0, 12))
 
@@ -443,37 +471,39 @@ class App(tk.Tk):
         try:
             n = int(self.spin_months.get())
         except ValueError:
-            messagebox.showerror("Error", "Número de meses inválido.")
+            messagebox.showerror("Error", "Numero de meses invalido.")
             return
         degree = int(self.cmb_degree.get().split(" ")[0])
         res = self.model.predict(n, degree)
-        self.lbl_mae.config(text=f"MAE: ${res['mae']:,.0f}", fg=COLORS["warning"])
-        self.lbl_r2.config(text=f"R²: {res['r2']:.4f}",
-                           fg=COLORS["success"] if res["r2"] > 0.7 else COLORS["danger"])
+        self.lbl_mae.config(text=f"MAE: ${res['mae']:,.0f}",
+                            fg=COLORS["warning"])
+        self.lbl_r2.config(
+            text=f"R2: {res['r2']:.4f}",
+            fg=COLORS["success"] if res["r2"] > 0.7 else COLORS["danger"])
         for w in self.frm_pred_chart.winfo_children():
             w.destroy()
-        fig = Figure(figsize=(9, 4), facecolor=COLORS["chart_bg"])
-        ax = fig.add_subplot(111, facecolor=COLORS["chart_bg"])
-        all_x = res["hist_x"] + res["future_x"]
+        fig    = Figure(figsize=(9, 4), facecolor=COLORS["chart_bg"])
+        ax     = fig.add_subplot(111, facecolor=COLORS["chart_bg"])
         n_hist = len(res["hist_x"])
         n_fut  = len(res["future_x"])
         ax.bar(range(n_hist), [v / 1000 for v in res["hist_y"]],
-               color=COLORS["accent"], alpha=0.65, label="Histórico", zorder=3)
+               color=COLORS["accent"], alpha=0.65, label="Historico", zorder=3)
         ax.plot(range(n_hist), [v / 1000 for v in res["fit_y"]],
                 color=COLORS["warning"], linewidth=2, linestyle="--",
                 label=f"Ajuste (grado {degree})", zorder=4)
-        future_start = n_hist - 1
-        x_fut = list(range(future_start, n_hist + n_fut))
-        y_fut_line = [res["fit_y"][-1] / 1000] + [v / 1000 for v in res["future_y"]]
+        x_fut   = list(range(n_hist - 1, n_hist + n_fut))
+        y_fut_l = [res["fit_y"][-1] / 1000] + [v / 1000 for v in res["future_y"]]
         ax.bar(range(n_hist, n_hist + n_fut),
                [v / 1000 for v in res["future_y"]],
-               color=COLORS["accent2"], alpha=0.65, label="Predicción", zorder=3)
-        ax.plot(x_fut, y_fut_line, color=COLORS["accent2"],
+               color=COLORS["accent2"], alpha=0.65, label="Prediccion", zorder=3)
+        ax.plot(x_fut, y_fut_l, color=COLORS["accent2"],
                 linewidth=2.5, marker="o", markersize=6, zorder=5)
+        all_x = res["hist_x"] + res["future_x"]
         ax.set_xticks(range(len(all_x)))
-        ax.set_xticklabels(all_x, rotation=45, ha="right", fontsize=7,
-                           color=COLORS["text_dim"])
-        ax.set_title("Predicción de Ingresos (miles $)", color=COLORS["text"], fontsize=12)
+        ax.set_xticklabels(all_x, rotation=45, ha="right",
+                           fontsize=7, color=COLORS["text_dim"])
+        ax.set_title("Prediccion de Ingresos (miles $)",
+                     color=COLORS["text"], fontsize=12)
         ax.legend(facecolor=COLORS["panel"], edgecolor=COLORS["border"],
                   labelcolor=COLORS["text"], fontsize=9)
         for spine in ax.spines.values():
@@ -490,15 +520,13 @@ class App(tk.Tk):
                  bg=COLORS["bg"], fg=COLORS["text_dim"],
                  font=("Segoe UI", 9, "bold")).pack(side="left", padx=4)
         for mes, val in zip(res["future_x"], res["future_y"]):
-            chip = tk.Label(self.frm_pred_tbl,
-                            text=f"{mes}: ${val:,.0f}",
-                            bg=COLORS["kpi_border"], fg=COLORS["accent"],
-                            font=("Segoe UI", 8), padx=8, pady=3)
-            chip.pack(side="left", padx=3)
+            tk.Label(self.frm_pred_tbl, text=f"{mes}: ${val:,.0f}",
+                     bg=COLORS["kpi_border"], fg=COLORS["accent"],
+                     font=("Segoe UI", 8), padx=8, pady=3).pack(side="left", padx=3)
 
     # ── Pestaña 4: Productos ──────────────────────────────────────────────────
     def _build_productos(self):
-        frm = self.tab_productos
+        frm  = self.tab_productos
         ctrl = tk.Frame(frm, bg=COLORS["bg"])
         ctrl.pack(fill="x", padx=16, pady=10)
         tk.Label(ctrl, text="Top N productos:", bg=COLORS["bg"],
@@ -510,7 +538,8 @@ class App(tk.Tk):
                    command=self._update_productos).pack(side="left")
         self.frm_prod = tk.Frame(frm, bg=COLORS["bg"])
         self.frm_prod.pack(fill="both", expand=True, padx=16, pady=(0, 10))
-        self._placeholder(self.frm_prod, "Carga un archivo CSV para ver el ranking de productos")
+        self._placeholder(self.frm_prod,
+            "Carga un CSV para ver el ranking de productos")
 
     def _update_productos(self):
         if self.model.df is None:
@@ -521,12 +550,12 @@ class App(tk.Tk):
             n = int(self.spin_top.get())
         except ValueError:
             n = 5
-        top = self.model.top_products(n)
-        fig = Figure(figsize=(8, max(3, n * 0.55)), facecolor=COLORS["chart_bg"])
-        ax = fig.add_subplot(111, facecolor=COLORS["chart_bg"])
-        colors_bar = CHART_COLORS[:len(top)]
+        top  = self.model.top_products(n)
+        fig  = Figure(figsize=(8, max(3, n * 0.55)),
+                      facecolor=COLORS["chart_bg"])
+        ax   = fig.add_subplot(111, facecolor=COLORS["chart_bg"])
         bars = ax.barh(top["producto"], top["ingresos"] / 1000,
-                       color=colors_bar, zorder=3)
+                       color=CHART_COLORS[:len(top)], zorder=3)
         for bar, val in zip(bars, top["ingresos"].values / 1000):
             ax.text(val + 0.2, bar.get_y() + bar.get_height() / 2,
                     f"${val:,.1f}k", va="center",
@@ -545,19 +574,21 @@ class App(tk.Tk):
 
     # ── Pestaña 5: Tabla mensual ──────────────────────────────────────────────
     def _build_tabla(self):
-        frm = self.tab_tabla
+        frm  = self.tab_tabla
         ctrl = tk.Frame(frm, bg=COLORS["bg"])
         ctrl.pack(fill="x", padx=16, pady=10)
-        ttk.Button(ctrl, text="📥  Exportar CSV",
-                   command=self._export_monthly, style="Sec.TButton").pack(side="left")
+        ttk.Button(ctrl, text="Exportar CSV",
+                   command=self._export_monthly,
+                   style="Sec.TButton").pack(side="left")
         self.frm_tbl = tk.Frame(frm, bg=COLORS["bg"])
         self.frm_tbl.pack(fill="both", expand=True, padx=16, pady=(0, 14))
-        self._placeholder(self.frm_tbl, "Carga un archivo CSV para ver la tabla mensual")
+        self._placeholder(self.frm_tbl,
+            "Carga un CSV para ver la tabla mensual")
 
     def _update_tabla(self):
         for w in self.frm_tbl.winfo_children():
             w.destroy()
-        df = self.model.monthly_table()
+        df   = self.model.monthly_table()
         cols = list(df.columns)
         tree = ttk.Treeview(self.frm_tbl, columns=cols, show="headings")
         for col in cols:
@@ -565,7 +596,8 @@ class App(tk.Tk):
             tree.column(col, anchor="center", width=140)
         for _, row in df.iterrows():
             tree.insert("", "end", values=list(row))
-        sb = ttk.Scrollbar(self.frm_tbl, orient="vertical", command=tree.yview)
+        sb = ttk.Scrollbar(self.frm_tbl, orient="vertical",
+                           command=tree.yview)
         tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         tree.pack(fill="both", expand=True)
@@ -575,18 +607,169 @@ class App(tk.Tk):
             messagebox.showwarning("Aviso", "No hay datos para exportar.")
             return
         path = filedialog.asksaveasfilename(
-            defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv")],
             title="Guardar tabla mensual")
         if path:
             self.model.df_monthly.to_csv(path, index=False)
-            messagebox.showinfo("Exportado", f"Archivo guardado en:\n{path}")
+            messagebox.showinfo("Exportado", f"Guardado en:\n{path}")
+
+    # ── Pestaña 6: Base de Datos ──────────────────────────────────────────────
+    def _build_bd(self):
+        frm = self.tab_bd
+
+        left = tk.Frame(frm, bg=COLORS["bg"], width=420)
+        left.pack(side="left", fill="y", padx=(16, 8), pady=16)
+        left.pack_propagate(False)
+
+        tk.Label(left, text="Archivos guardados en BD",
+                 bg=COLORS["bg"], fg=COLORS["text"],
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 8))
+
+        cols_arch = ("id", "nombre", "registros", "fecha_carga")
+        self.tree_bd = ttk.Treeview(left, columns=cols_arch,
+                                    show="headings", height=16)
+        self.tree_bd.heading("id",          text="ID")
+        self.tree_bd.heading("nombre",      text="Archivo")
+        self.tree_bd.heading("registros",   text="Registros")
+        self.tree_bd.heading("fecha_carga", text="Fecha carga")
+        self.tree_bd.column("id",          width=35,  anchor="center")
+        self.tree_bd.column("nombre",      width=180, anchor="w")
+        self.tree_bd.column("registros",   width=70,  anchor="center")
+        self.tree_bd.column("fecha_carga", width=130, anchor="center")
+        sb_bd = ttk.Scrollbar(left, orient="vertical",
+                              command=self.tree_bd.yview)
+        self.tree_bd.configure(yscrollcommand=sb_bd.set)
+        sb_bd.pack(side="right", fill="y")
+        self.tree_bd.pack(fill="both", expand=True)
+        self.tree_bd.bind("<<TreeviewSelect>>", self._on_bd_select)
+
+        btn_row = tk.Frame(left, bg=COLORS["bg"])
+        btn_row.pack(fill="x", pady=(8, 0))
+        ttk.Button(btn_row, text="Cargar seleccionado",
+                   command=self._bd_cargar).pack(side="left", padx=(0, 6))
+        ttk.Button(btn_row, text="Eliminar",
+                   command=self._bd_eliminar,
+                   style="Danger.TButton").pack(side="left", padx=(0, 6))
+        ttk.Button(btn_row, text="Actualizar lista",
+                   command=self._bd_refresh,
+                   style="Sec.TButton").pack(side="left")
+
+        right = tk.Frame(frm, bg=COLORS["panel"],
+                         highlightbackground=COLORS["border"],
+                         highlightthickness=1)
+        right.pack(side="left", fill="both", expand=True,
+                   padx=(0, 16), pady=16)
+        tk.Label(right, text="Estadisticas del archivo",
+                 bg=COLORS["panel"], fg=COLORS["text"],
+                 font=("Segoe UI", 11, "bold")).pack(
+                     anchor="w", padx=16, pady=(14, 8))
+        self.frm_bd_stats = tk.Frame(right, bg=COLORS["panel"])
+        self.frm_bd_stats.pack(fill="x", padx=16)
+        self._bd_stats_placeholder()
+        self._bd_refresh()
+
+    def _bd_stats_placeholder(self):
+        for w in self.frm_bd_stats.winfo_children():
+            w.destroy()
+        tk.Label(self.frm_bd_stats,
+                 text="Selecciona un archivo para ver sus estadisticas",
+                 bg=COLORS["panel"], fg=COLORS["text_dim"],
+                 font=("Segoe UI", 10)).pack(pady=30)
+
+    def _bd_refresh(self):
+        for row in self.tree_bd.get_children():
+            self.tree_bd.delete(row)
+        for arch in self.db.listar_archivos():
+            self.tree_bd.insert("", "end", iid=str(arch.id), values=(
+                arch.id,
+                arch.nombre,
+                arch.total_registros,
+                arch.fecha_carga.strftime("%d/%m/%Y %H:%M")
+                    if arch.fecha_carga else "—",
+            ))
+
+    def _on_bd_select(self, event):
+        sel = self.tree_bd.selection()
+        if not sel:
+            return
+        archivo_id = int(sel[0])
+        stats = self.db.stats_archivo(archivo_id)
+        for w in self.frm_bd_stats.winfo_children():
+            w.destroy()
+        stat_items = [
+            ("Registros totales",  str(stats["registros"])),
+            ("Total ingresos",     f"${stats['total_ingresos']:,.0f}"),
+            ("Promedio por venta", f"${stats['promedio_ingreso']:,.2f}"),
+            ("Productos unicos",   str(stats["productos"])),
+            ("Fecha inicio",       str(stats["fecha_min"])[:10]
+                                   if stats["fecha_min"] else "—"),
+            ("Fecha fin",          str(stats["fecha_max"])[:10]
+                                   if stats["fecha_max"] else "—"),
+        ]
+        for label, valor in stat_items:
+            row = tk.Frame(self.frm_bd_stats, bg=COLORS["panel"])
+            row.pack(fill="x", pady=4)
+            tk.Label(row, text=label, bg=COLORS["panel"],
+                     fg=COLORS["text_dim"],
+                     font=("Segoe UI", 9), width=20, anchor="w").pack(side="left")
+            tk.Label(row, text=valor, bg=COLORS["panel"],
+                     fg=COLORS["text"],
+                     font=("Segoe UI", 10, "bold")).pack(side="left")
+
+    def _bd_cargar(self):
+        sel = self.tree_bd.selection()
+        if not sel:
+            messagebox.showinfo("Aviso", "Selecciona un archivo de la lista.")
+            return
+        archivo_id = int(sel[0])
+        df = self.db.cargar_archivo(archivo_id)
+        if df.empty:
+            messagebox.showerror("Error",
+                "No se encontraron datos para ese archivo.")
+            return
+        ok, msg = self.model.load_dataframe(df)
+        if ok:
+            arch   = next((a for a in self.db.listar_archivos()
+                           if a.id == archivo_id), None)
+            nombre = arch.nombre if arch else f"ID {archivo_id}"
+            self.lbl_file.config(text=f"BD: {nombre}")
+            self.lbl_status.config(text=msg, fg=COLORS["success"])
+            self._update_dashboard()
+            self._update_tendencias()
+            self._update_productos()
+            self._update_tabla()
+            self.nb.select(self.tab_dashboard)
+        else:
+            messagebox.showerror("Error", msg)
+
+    def _bd_eliminar(self):
+        sel = self.tree_bd.selection()
+        if not sel:
+            messagebox.showinfo("Aviso",
+                "Selecciona un archivo para eliminar.")
+            return
+        archivo_id = int(sel[0])
+        confirm = messagebox.askyesno(
+            "Confirmar eliminacion",
+            f"Se eliminara el archivo ID {archivo_id} y todos sus registros.\n"
+            "Esta accion no se puede deshacer. Continuar?")
+        if confirm:
+            ok = self.db.eliminar_archivo(archivo_id)
+            if ok:
+                self.lbl_status.config(
+                    text=f"Archivo {archivo_id} eliminado de la BD.",
+                    fg=COLORS["warning"])
+                self._bd_refresh()
+                self._bd_stats_placeholder()
+            else:
+                messagebox.showerror("Error",
+                    "No se pudo eliminar el archivo.")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
     def _placeholder(self, parent, msg="Sin datos"):
         f = tk.Frame(parent, bg=COLORS["bg"])
         f.place(relx=0.5, rely=0.5, anchor="center")
-        tk.Label(f, text="📊", bg=COLORS["bg"],
-                 font=("Segoe UI", 36)).pack()
         tk.Label(f, text=msg, bg=COLORS["bg"],
                  fg=COLORS["text_dim"], font=("Segoe UI", 12)).pack(pady=6)
 
@@ -598,24 +781,29 @@ class App(tk.Tk):
             return
         self._apply_file(path)
 
-    def _apply_file(self, path):
-        ok, msg = self.model.load_csv(path)
-        short = path.split("/")[-1].split("\\")[-1]
-        self.lbl_file.config(text=f"📄 {short}")
+    def _apply_file(self, path: str):
+        ok, msg, df = self.model.load_csv(path)
+        short = path.replace("\\", "/").split("/")[-1]
+        self.lbl_file.config(text=short)
         if ok:
-            self.lbl_status.config(text=msg, fg=COLORS["success"])
+            archivo_id = self.db.guardar_csv(df, short, path)
+            self.lbl_status.config(
+                text=f"{msg}  |  Guardado en BD (ID {archivo_id})",
+                fg=COLORS["success"])
             self._update_dashboard()
             self._update_tendencias()
             self._update_productos()
             self._update_tabla()
+            self._bd_refresh()
         else:
             self.lbl_status.config(text=msg, fg=COLORS["danger"])
             messagebox.showerror("Error al cargar", msg)
 
     def _reload(self):
-        path = self.lbl_file.cget("text").replace("📄 ", "").strip()
-        if not path or path == "Sin archivo cargado":
-            messagebox.showinfo("Info", "No hay archivo cargado para recargar.")
+        path = self.lbl_file.cget("text").strip()
+        if not path or path == "Sin archivo cargado" or path.startswith("BD:"):
+            messagebox.showinfo("Info",
+                "No hay archivo CSV en disco para recargar.")
             return
         self._apply_file(path)
 
